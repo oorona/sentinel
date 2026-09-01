@@ -1,0 +1,62 @@
+PROJECT: Sentinel UI Workflow & State Specification
+===================================================
+
+1. ARCHITECTURAL PATTERN
+------------------------
+- Frontend: Next.js (App Router) with Tailwind CSS.
+- State Management: React Query (for server state) + Socket.io or SSE (for real-time events).
+- Theme: Next-Themes (automatic light/dark detection).
+
+2. THE "INCIDENT CARD" LIFECYCLE
+--------------------------------
+Every incident exists as a "Card" component in a CSS Grid. The UI reacts to state changes pushed by the Python/Redis backend.
+
+A. DETECTION PHASE (CUSUM TRIP)
+   - Action: Backend pushes 'NEW_INCIDENT' via SSE.
+   - UI: A new card "slides in" to the top of the grid with a subtle pulse animation.
+   - Initial State: Header is GRAY. Status: "Detecting Pattern..."
+   - Side Action: A dedicated Loki Log Stream window opens inside the card automatically.
+
+B. CLASSIFICATION PHASE (KNOWLEDGE BASE LOOKUP)
+   - State 1: EXPECTED (Green Theme)
+     - Header turns GREEN. Label: "Scheduled Event: [Profile_Name]".
+     - Data: Show Start Time, Target Name, Target Type (Prod/Dev), and Priority.
+     - Interactive: A countdown timer (e.g., "01:45:12 remaining") appears, backed by a Progress Bar.
+   - State 2: UNEXPECTED (Red Theme)
+     - Header turns RED. Label: "Anomaly Detected".
+     - Action: Immediately trigger Gemini 3.0 Pro Analysis.
+
+C. ANALYSIS PHASE (GEMINI STREAMING)
+   - Trigger: Event is Unexpected OR Countdown reaches 00:00:00 but CPU remains high.
+   - UI Component: "Gemini Intelligence" section expands.
+   - Thinking Stream: A "Thought Terminal" appears. Text from Gemini's 'thinking' block streams in real-time with a typewriter effect.
+   - Final Response: Once thinking finishes, the "Structured Output" (JSON) is parsed and rendered as a clean report:
+     - Root Cause: [Text]
+     - Recommendation: [Text]
+     - Action Button: [Notify Team / Silence / Acknowledge]
+
+3. LOG STREAMING ENGINE (LOKI)
+------------------------------
+- Implementation: When an incident is active, the card displays a terminal window.
+- Behavior: New logs from Loki stream into the terminal. 
+- Auto-Scroll: Terminal should auto-scroll to the bottom unless the user manually scrolls up to inspect a log line.
+- Stop Condition: Stream closes only when the card is "Dismissed" or "Acknowledged".
+
+4. GLOBAL UI COMPONENTS
+-----------------------
+- THE HEADER:
+    - Global Status Indicator (System Health).
+    - Navigation: [Dashboard] [History] [Target Config] [Prompt Lab].
+- PROMPT LAB:
+    - Monaco Editor (or similar) to edit the System Prompt.
+    - JSON Schema editor for the Structured Output validation.
+    - "Test Prompt" button to run a simulation.
+- TARGET CONFIG:
+    - Table view to associate Prometheus 'instance' labels with human names and types.
+    - Toggle for "Auto-Notify" per target.
+
+5. RESPONSIVENESS & INTERACTION
+-------------------------------
+- Reactive: If the CPU drop is detected by the backend, the card should auto-transition to a "Completed" state (Success Checkmark).
+- Dismissal: Users can click "Acknowledge". The card performs a "fade out" and is moved to the PostgreSQL History table.
+- Real-Time Counters: Countdown timers must be calculated locally in the browser based on the 'Expected_End_Time' timestamp sent by the backend to ensure 100% sync.

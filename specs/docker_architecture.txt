@@ -1,0 +1,25 @@
+PROJECT: Docker Multi-Stage Deployment Spec
+===========================================
+
+1. NETWORK TOPOLOGY
+-------------------
+- 'intranet': sentinel-ui <-> sentinel-api
+- 'dbnet': sentinel-api <-> postgres, redis, prometheus, loki
+- 'internet': traefik <-> all public-facing UIs
+
+2. PERSISTENCE STRATEGY
+-----------------------
+- postgres_data: Docker volume for long-term history.
+- redis_data: Optional persistence (incidents can live in RAM).
+- letsencrypt_certs: Volume for Traefik SSL certs.
+
+3. ENVIRONMENT & SECRETS
+------------------------
+- USE_DOCKER_SECRETS: For DB_PASSWORD, GEMINI_API_KEY, SSH_PRIVATE_KEYS.
+- ENV_VARS: PROMETHEUS_URL, LOKI_URL, REDIS_URL, NEXT_PUBLIC_API_URL.
+
+4. REVERSE PROXY (Traefik)
+--------------------------
+- Enable Dashboard (internal only).
+- Entrypoints: web (80) -> redirect to websecure (443).
+- Autoconfigure SSL via Cloudflare or DigitalOcean DNS challenge.

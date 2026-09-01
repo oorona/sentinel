@@ -1,0 +1,36 @@
+PROJECT: LLM Prompting & Reasoning Strategy
+===========================================
+
+1. SYSTEM PROMPT CONTEXT
+------------------------
+"You are a Senior Site Reliability Engineer and DBA. You are monitoring a high-performance database cluster. 
+Your goal is to distinguish between scheduled maintenance spikes and genuine performance degradation."
+
+2. DATA INPUT FORMAT (The Context window)
+-----------------------------------------
+The Python backend will provide the following to the LLM:
+- TARGET_METADATA: {Name, Type, Priority}
+- METRIC_STATS: {RiseTime: 12s, Peak: 94%, Integral: 12500, Deviation_from_Mean: +4.2 sigma}
+- RECENT_LOGS: [Last 100 lines from Loki]
+- HISTORICAL_PROFILE: {Expected_Duration: 120m, Actual_Duration: 185m}
+
+3. REASONING REQUIREMENTS (Thinking Mode)
+-----------------------------------------
+1. Compare RiseTime vs. historical RiseTime.
+2. Look for error keywords in Logs (ORA-, FATAL, Connection Refused).
+3. Evaluate if the prolonged duration matches a known data growth trend or a hang.
+4. Output thinking process clearly before finalizing JSON.
+
+4. STRUCTURED OUTPUT SCHEMA (Validation)
+----------------------------------------
+Targeting Gemini's response_mime_type: "application/json"
+Schema:
+{
+  "type": "object",
+  "properties": {
+    "is_anomaly": {"type": "boolean"},
+    "root_cause": {"type": "string"},
+    "remediation_steps": {"type": "array", "items": {"type": "string"}},
+    "urgency": {"type": "string", "enum": ["LOW", "HIGH", "CRITICAL"]}
+  }
+}

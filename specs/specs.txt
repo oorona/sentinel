@@ -1,0 +1,306 @@
+PROJECT: AIOps Sentinel
+Version: 1.0
+================================================
+
+1. OVERVIEW
+-----------
+AIOps Sentinel is an AI-powered infrastructure observability platform. It combines
+statistical anomaly detection (MAD/CUSUM) with Google Gemini large language model
+reasoning to autonomously detect, classify, and diagnose infrastructure incidents.
+
+The system continuously polls Prometheus metrics, runs a mathematical detection
+pipeline, and conditionally invokes a two-stage LLM inference pipeline (fast triage
+via Gemini Flash, deep analysis via Gemini Pro with extended thinking). All state
+and AI output is streamed in real time to a browser dashboard via Server-Sent Events.
+
+
+2. CORE ARCHITECTURE
+--------------------
+- Backend: Python 3.12 (FastAPI) with asyncio and Server-Sent Events (SSE).
+- Frontend: Next.js 15 / React 19 / Tailwind CSS v4 with React Query for state.
+- Metrics Source: Prometheus v3 (HTTP API, PromQL range queries).
+- Log Source: Loki 3.x (HTTP API, LogQL label stream queries).
+- Primary Database: PostgreSQL 16 (SQLAlchemy 2 async, Alembic migrations).
+  Tables: targets, metric_profiles, incident_history, prompt_templates.
+- Cache / State: Redis 7 (active incident state, SSE pub/sub broadcast buffers).
+- Proxy: Traefik v3 with Let's Encrypt for TLS termination.
+- AI SDK: google-genai 1.x (official Google Gemini Python SDK).
+
+
+3. MATHEMATICAL ENGINE
+----------------------
+File: backend/app/services/math_engine.py
+Dependencies: NumPy 2.x, SciPy 1.x
+
+3.1 Modified Z-Score (MAD)
+  Formula: 0.6745 * (xi - median) / MAD
+  - Uses Median Absolute Deviation instead of standard deviation.
+  - Robust to outliers; standard Z-score is distorted by the very spikes it detects.
+  - Threshold: MAD_ZSCORE_THRESHOLD (default 3.5). Configurable via env var.
+  - Returns modified_z_score per sample; max(|z|) determines anomaly flag.
+
+3.2 CUSUM Change-Point Detection
+  Algorithm: Two one-sided cumulative sum statistics.
+    C+[i] = max(0, C+[i-1] + (x[i] - mu0 - k))
+    C-[i] = max(0, C-[i-1] - (x[i] - mu0 + k))
+  - k = CUSUM_SLACK_MULTIPLIER * sigma   (allowable slack, default: 0.5)
+  - H = CUSUM_ALARM_THRESHOLD * sigma    (alarm threshold, default: 4.0)
+  - Alarm fires when C+[i] > H or C-[i] > H.
+  - Back-tracks to find true alarm start (spike_start_idx).
+  - Catches gradual mean shifts (memory leaks, connection exhaustion) that
+    threshold-based alerts miss.
+  - Configurable: CUSUM_SLACK_MULTIPLIER, CUSUM_ALARM_THRESHOLD.
+
+3.3 Feature Extraction (per detected spike)
+  - Rise Time: seconds from 10% to 90% of peak amplitude above baseline.
+    Distinguishes sharp batch job signatures from gradual degradation.
+  - Integral: area under curve above baseline (sum of (value - baseline) * dt).
+    Proxy for total CPU load injected during the event.
+  - Kurtosis: spike shape measure (scipy.stats.kurtosis on spike window).
+    High kurtosis = sharp spike; low = broad, flat-top event.
+
+3.4 Profile Matching
+  - Live AnomalySignal compared against stored MetricProfile records.
+  - Match criteria: peak CPU within 30% relative tolerance AND integral within
+    50% relative tolerance.
+  - Match -> incident classified as "expected".
+  - No match -> incident classified as "unexpected" -> Gemini triggered immediately.
+
+3.5 Online Profile Updates (Welford's Algorithm)
+  - On normal event resolution, profile is updated incrementally.
+  - Welford's online algorithm: no historical data storage required.
+    delta = new_value - old_mean
+    new_mean = old_mean + delta / n
+  - Updates: mean_peak_cpu, mean_rise_time_seconds, mean_integral,
+    expected_duration_minutes, std_duration_minutes, sample_count.
+
+3.6 Overrun Detection
+  - An expected event becomes "overdue" when:
+    elapsed > expected_duration * EXPECTED_OVERRUN_MULTIPLIER (default 1.2)
+  - Triggers Gemini escalation with MEDIUM thinking budget.
+
+
+4. GEMINI AI INTEGRATION
+------------------------
+File: backend/app/services/gemini_service.py
+SDK: google-genai 1.x
+
+4.1 Models
+  - GEMINI_PRO_MODEL: gemini-3-pro-preview (deep analysis, extended thinking)
+  - GEMINI_FLASH_MODEL: gemini-3-flash-preview (fast triage, no thinking)
+  Both configurable via environment variables.
+
+4.2 Deep Analysis Pipeline (stream_analysis)
+  - Uses ThinkingConfig(include_thoughts=True, thinking_budget=N).
+  - GEMINI_THINKING_BUDGET: 15000 tokens (unexpected anomalies, default).
+  - GEMINI_THINKING_BUDGET_MEDIUM: 8000 tokens (overrun escalation).
+  - Response constrained by response_mime_type="application/json" and response_schema.
+  - Streaming: thought parts (thought=True) yielded as {"type": "thought", "text": "..."}
+    Response parts accumulated into JSON buffer, yielded as {"type": "final", "data": {...}}
+  - Temperature: 0.1 (deterministic, consistent diagnostics).
+
+4.3 Fast Triage (quick_classify)
+  - Single non-streaming call using Gemini 3 Flash.
+  - Minimal schema: is_anomaly, severity, confidence_score, root_cause_analysis.
+  - Returns within seconds for immediate UI feedback.
+
+4.4 Context Assembly (multi-modal grounding)
+  The prompt fed to Gemini has four structured XML-delimited sections:
+  - <TARGET_INFO>: name, environment (prod/dev/test), priority, DB type.
+  - <METRICS>: peak_cpu_percent, mad_zscore, rise_time_seconds, integral,
+    kurtosis, cusum_upper, direction, recent_values (last 20 samples), timestamps.
+  - <HISTORY>: profile_name, expected_duration_minutes, std_duration_minutes,
+    mean_peak_cpu, mean_rise_time_seconds, sample_count, actual_duration_minutes,
+    overrun_minutes (if applicable).
+  - <LOGS>: last LOKI_LOG_LINES lines from Loki for the target.
+
+4.5 Structured Output Schema (specs/gemini_response_schema.json)
+  Required fields:
+    is_anomaly           (boolean)
+    severity             (string: "INFO" | "WARNING" | "CRITICAL")
+    root_cause_analysis  (string: 2-3 sentence summary)
+    confidence_score     (number: 0.0 - 1.0, model self-assessment)
+  Optional fields:
+    detected_errors      (array of strings: error codes / log snippets)
+    remediation_steps    (array of strings: ordered actionable steps)
+
+4.6 System Prompt (specs/gemini_thinking_system_prompt.txt)
+  Persona: Senior Site Reliability Engineer (SRE) and Database Expert.
+  Five-step reasoning protocol enforced in the thinking block:
+    1. TEMPORAL ANALYSIS   - compare current vs expected duration
+    2. SLOPE VALIDATION    - batch signature vs anomaly signature
+    3. LOG CORRELATION     - scan for ORA-, FATAL, Deadlock, Connection Refused
+    4. HYPOTHESIS GENERATION - formulate at least two causes
+    5. VERIFICATION        - cross-validate metrics vs logs; flag as Ambiguous if mismatch
+  Thinking level:
+    HIGH   - unexpected anomalies (full 15k token budget)
+    MEDIUM - duration overruns on known profiles (8k token budget)
+
+4.7 Prompt Lab (test_prompt)
+  Exposes the full inference pipeline to the /prompt-lab UI.
+  Accepts: system_prompt (string), json_schema (dict), test_context (dict).
+  Returns: thought_process (string), structured_output (dict), raw_json (string).
+  Changes persisted to prompt_templates table in PostgreSQL.
+
+
+5. INCIDENT LIFECYCLE
+---------------------
+File: backend/app/services/incident_manager.py
+
+States: detecting -> expected | unexpected -> analyzing -> analyzed -> resolved | acknowledged
+
+5.1 Event Classification
+  - Spike detected, profile match found -> "expected"
+  - Spike detected, no profile match    -> "unexpected"
+  - Expected event exceeds overrun threshold -> "overdue"
+
+5.2 Gemini Trigger Rules
+  - Unexpected: triggered immediately (full thinking budget).
+  - Overdue: triggered after duration * EXPECTED_OVERRUN_MULTIPLIER (medium budget).
+  - Expected resolved normally: no Gemini call.
+
+5.3 Storage
+  Redis (volatile, TTL-based):
+    - Active incident state: id, target_id, classification, status, start_ts,
+      expected_end_ts, current_metric_value, mad_zscore, cusum_upper, profile_name.
+    - TTL: expected_end_ts + 2 hours (expected events) or 24 hours (unexpected).
+    - Loki log ring buffer per incident_id.
+  PostgreSQL (persistent):
+    - incident_history: all fields above + llm_thought_process (text),
+      llm_structured_output (JSONB), loki_logs_snapshot (text), final_severity,
+      matched_profile_id.
+
+5.4 SSE Broadcast Events
+  incident_created  - full card payload on new incident
+  incident_update   - partial update (status, severity, countdown_sec, current_cpu)
+  gemini_thought    - streaming thought chunk {id, chunk}
+  gemini_final      - complete structured JSON verdict {id, structured_json}
+  loki_logs         - new log line {id, log_line, timestamp}
+
+
+6. MONITORING WORKER
+--------------------
+File: backend/app/workers/monitoring_worker.py
+
+Polling loop runs as asyncio background task inside FastAPI process.
+
+Cycle (every PROMETHEUS_POLL_INTERVAL_SECONDS = 30s):
+  1. Load all Target records from PostgreSQL.
+  2. For each target, fetch CPU time series from Prometheus (PromQL range query).
+     Lookback: PROMETHEUS_LOOKBACK_MINUTES (default 60 min).
+  3. Fetch latest MetricProfile for baseline_mean.
+  4. Run detect_anomaly() -> AnomalySignal.
+  5. Check Redis for existing active incident on this target.
+     - Anomaly + existing incident: update current_metric_value, check overrun.
+     - Anomaly + no incident: create_incident(), trigger Gemini if unexpected.
+     - No anomaly + existing active incident: resolve_incident(), update profile.
+
+Loki ticker (every LOKI_POLL_INTERVAL_SECONDS = 5s):
+  For all active incidents, tail new log lines since last poll.
+  Push to Redis ring buffer and broadcast via SSE.
+
+All targets processed concurrently via asyncio.gather().
+
+
+7. REAL-TIME STREAMING (SSE)
+-----------------------------
+File: backend/app/services/sse_manager.py
+
+- Single /api/v1/events endpoint streams all event types.
+- Redis pub/sub as broadcast layer (supports multiple API workers).
+- Frontend: custom useSSE hook merges server-pushed updates into React Query cache.
+- Gemini thinking chunks stream token-by-token to GeminiThinkingStream component.
+- Loki log lines append to LogTerminal component in real time.
+
+
+8. UI / FRONTEND
+----------------
+Framework: Next.js 15 App Router, React 19, Tailwind CSS v4.
+State: React Query (@tanstack/react-query) + SSE hook for live updates.
+
+Pages:
+  / (dashboard)     - Live IncidentGrid with real-time cards.
+  /targets          - CRUD for monitoring targets and profiles.
+  /prompt-lab       - Live system prompt and schema editor with test runner.
+  /history          - Searchable incident history table with AI output viewer.
+
+Key components:
+  IncidentGrid          - Grid of IncidentCard components, SSE-updated.
+  IncidentCard          - Classification badge, countdown timer, severity chip,
+                          expandable Gemini thinking stream and log terminal.
+  GeminiThinkingStream  - Streams and renders the live Gemini thought process.
+  LogTerminal           - Real-time Loki log viewer.
+  CardCountdown         - Live countdown to expected event resolution.
+
+
+9. DOCKER TOPOLOGY
+------------------
+Services:
+  sentinel-ui   - Next.js 15 on port 3000. Traefik routes internet traffic here.
+                  Proxies /api/* -> sentinel-api over intranet.
+  sentinel-api  - FastAPI + monitoring worker on port 8000. Intranet + dbnet only.
+                  Never directly internet-exposed.
+
+Networks (all external, pre-existing):
+  internet  - Traefik <-> sentinel-ui (HTTPS)
+  intranet  - sentinel-ui <-> sentinel-api (internal proxy)
+  dbnet     - sentinel-api <-> postgres, prometheus, loki, redis
+
+Secrets (Docker secrets, mounted at /run/secrets/):
+  gemini_api_key     - Google Gemini API key
+  postgres_password  - PostgreSQL password
+  Source directory set via SENTINEL_SECRETS_DIR env var at deploy time.
+
+External dependencies (not managed by this stack):
+  postgres, prometheus, loki (with promtail), traefik
+
+
+10. CONFIGURATION REFERENCE
+----------------------------
+All non-sensitive config in .env (see .env.example).
+Sensitive values (API keys, passwords) via Docker secrets only.
+
+Database:
+  POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER
+  POSTGRES_PASSWORD -> Docker secret
+
+Gemini:
+  GEMINI_PRO_MODEL              (default: gemini-3-pro-preview)
+  GEMINI_FLASH_MODEL            (default: gemini-3-flash-preview)
+  GEMINI_API_KEY                -> Docker secret
+  GEMINI_THINKING_BUDGET        (default: 15000 tokens)
+  GEMINI_THINKING_BUDGET_MEDIUM (default: 8000 tokens)
+
+Service URLs:
+  REDIS_URL, PROMETHEUS_URL, LOKI_URL
+
+Monitoring:
+  PROMETHEUS_POLL_INTERVAL_SECONDS  (default: 30)
+  PROMETHEUS_LOOKBACK_MINUTES       (default: 60)
+  LOKI_LOG_LINES                    (default: 100)
+  LOKI_POLL_INTERVAL_SECONDS        (default: 5)
+  LEARNING_WINDOW_DAYS              (default: 30)
+
+MAD/CUSUM Thresholds:
+  MAD_ZSCORE_THRESHOLD        (default: 3.5)
+  CUSUM_SLACK_MULTIPLIER      (default: 0.5)
+  CUSUM_ALARM_THRESHOLD       (default: 4.0)
+  EXPECTED_OVERRUN_MULTIPLIER (default: 1.2)
+
+Debug:
+  DEBUG (default: false)
+
+
+11. TECHNOLOGY STACK
+--------------------
+Backend:      Python 3.12, FastAPI 0.115, uvicorn, sse-starlette
+AI SDK:       google-genai 1.7.0
+Math:         NumPy 2.2, SciPy 1.15
+Database:     SQLAlchemy 2.0 (async), asyncpg, Alembic 1.14
+Cache:        redis[hiredis] 5.2
+HTTP clients: aiohttp 3.11, httpx 0.28
+Config:       pydantic-settings 2.7
+Logging:      structlog 24.4
+Frontend:     Next.js 15, React 19, Tailwind CSS v4, @tanstack/react-query
+Infra:        PostgreSQL 16, Redis 7, Prometheus v3, Loki 3.x, Traefik v3
+Containers:   Docker Engine 24+, Docker Compose v2

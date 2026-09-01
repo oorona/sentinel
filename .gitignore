@@ -1,0 +1,31 @@
+# Secrets
+.env
+secrets/
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Docker
+*.override.yml
+
+# OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

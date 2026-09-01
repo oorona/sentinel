@@ -1,0 +1,29 @@
+PROJECT: API & Data Contract (Sentinel <=> Frontend)
+====================================================
+
+1. SSE (SERVER-SENT EVENTS) ENDPOINTS
+-------------------------------------
+Endpoint: /api/v1/incidents/stream
+Purpose: Real-time UI updates.
+Event Types:
+  - 'incident_created': Payload { id, target_id, target_name, type, status, start_ts }
+  - 'incident_update': Payload { id, current_cpu, countdown_sec, status }
+  - 'gemini_thought': Payload { id, chunk } (Raw text stream from Gemini thinking)
+  - 'gemini_final': Payload { id, structured_json } (Final parsed output)
+  - 'loki_logs': Payload { id, log_line, timestamp }
+
+2. REDIS KEY SCHEMA
+-------------------
+- active_incident:{id} -> Hashmap {start_ts, expected_duration, target_id, status}
+- target_metadata:{id} -> JSON {name, type, priority, prometheus_label}
+- stream_buffer:{id} -> List (Last 50 log lines for new UI joins)
+
+3. POSTGRES SCHEMA (Relational Mapping)
+---------------------------------------
+TABLE targets:
+  - id (UUID), name, env (prod/dev), priority, prom_label, auto_notify (bool)
+TABLE incident_history:
+  - id (UUID), target_id, start_ts, end_ts, classification (expected/anomaly)
+  - llm_analysis (JSONB), final_status (ack/resolved)
+TABLE prompt_templates:
+  - id (UUID), name, version, system_message, json_schema

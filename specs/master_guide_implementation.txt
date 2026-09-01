@@ -1,0 +1,140 @@
+MASTER IMPLEMENTATION GUIDE: AIOPS SENTINEL & LOAD-GEN
+======================================================
+Version: 1.0
+Target Stack: Python (FastAPI), Next.js, Postgres, Redis, Prometheus, Loki, Gemini 3.0
+
+1. PROJECT VISION
+-----------------
+To transition from reactive, threshold-based alerting to autonomous observability. 
+The system uses statistical profiling (MAD/CUSUM) to identify "known" behavior and 
+leverages Gemini 3.0 Pro's reasoning capabilities to investigate "unknown" anomalies 
+or duration overruns, providing real-time streaming feedback to the user.
+
+
+1. Executive Project Summary
+
+Goal: Build a "Self-Aware" observability platform that suppresses known maintenance spikes using statistical profiling (MAD/CUSUM) and investigates anomalies using Gemini 3.0 Pro's "Thinking" mode.
+Target Systems: Linux Hosts, Oracle Databases, PostgreSQL Databases.
+Primary Tech: FastAPI (Python), Next.js (TypeScript), PostgreSQL, Redis, Prometheus, Loki.
+2. The Data Infrastructure
+
+To ensure the system is "Real-Time," the data flow is split into Persistence and State:
+
+    Persistence (PostgreSQL): Stores historical "signatures" (Integral, Rise Time, Duration) and the final incident history.
+
+    Volatile State (Redis): Manages "Live" incidents. Every active card on the UI corresponds to a Redis key with a TTL (Time-to-Live) based on the expected duration.
+
+    Ingestion: Python workers use aiohttp to poll Prometheus every 15–30 seconds.
+
+3. Mathematical Module: "The Fingerprint"
+
+Implementation of the Learning Phase must use a sliding window approach:
+
+    Baseline Generation: Query 30 days of metrics.
+
+    MAD Calculation: Identify the median and calculate the Median Absolute Deviation to set a robust threshold.
+
+    CUSUM Integration: Use a cumulative sum integrator to find the exact start/stop of spikes to within 1 minute of precision.
+
+    Profile Storage: Save the "Fingerprint" (Peak intensity + Duration + Rise Time) to PostgreSQL.
+
+4. AI Orchestration (Gemini 3.0 Pro)
+
+The system leverages the Gemini 3.0 Pro capabilities for reasoning when math indicates a deviation.
+
+    The Trigger: An event is "Unexpected" (no profile match) OR an "Expected" event exceeds its duration threshold.
+
+    The Context Injection: The backend fetches the last 100 lines of Loki logs for that specific target and serializes the Prometheus metric data into a text-based table.
+
+    Streaming Logic: The backend uses the Google AI Python SDK to stream the response.
+
+        Phase 1 (Thinking): Streamed directly to the thought window in the UI.
+
+        Phase 2 (Structured): The final JSON object is validated against a schema before being pushed to the UI for the "Final Verdict" card update.
+
+
+5. CORE COMPONENTS & ARCHITECTURE
+---------------------------------
+- MONITORING ENGINE: Python worker polling Prometheus. Uses math to filter noise.
+- STATE MANAGER: Redis holds real-time incident status, countdowns, and stream buffers.
+- KNOWLEDGE BASE: PostgreSQL stores long-term historical "signatures" of spikes.
+- INTELLIGENCE LAYER: Gemini 3.0 Pro (Thinking Mode) for root cause analysis.
+- OBSERVABILITY UI: Next.js frontend with SSE for real-time log and thought streaming.
+- REVERSE PROXY: Traefik for SSL termination and service routing.
+
+6. WORKFLOW: THE LIFE OF AN INCIDENT
+------------------------------------
+1. DETECTION: 
+   - Backend calculates Robust Z-Score (MAD) and CUSUM.
+   - When mean shift is detected, a unique Incident ID is generated in Redis.
+   - A New Card is pushed to the Next.js UI via Server-Sent Events (SSE).
+
+2. CLASSIFICATION:
+   - Backend compares the current spike's timestamp and intensity against 
+     the PostgreSQL 'metric_profiles' table.
+   - IF MATCH: Card turns GREEN. Countdown timer starts based on 'Expected_Duration'.
+   - IF NO MATCH: Card turns RED. Gemini 3.0 Pro is triggered immediately.
+
+3. ESCALATION (The "Timeout" Logic):
+   - If an EXPECTED event (Green) exceeds its duration threshold (e.g., > 120m), 
+     the card turns RED, and the LLM is triggered to investigate why it's late.
+
+4. INVESTIGATION:
+   - Backend pulls the last 100 lines of Loki logs for the specific target.
+   - Gemini 3.0 Pro begins "Thinking" mode.
+   - The UI streams the LLM's thought process into the card in real-time.
+   - Final Structured Output (JSON) provides the Root Cause and Actionable Steps.
+
+7. LLM IMPLEMENTATION SPECIFICS
+-------------------------------
+The system MUST adhere to the Gemini 3.0 developer guidelines:
+- TEXT GEN & STREAMING: https://ai.google.dev/gemini-api/docs/text-generation
+- STRUCTURED OUTPUT: https://ai.google.dev/gemini-api/docs/structured-output?example=recipe
+- THINKING MODE: https://ai.google.dev/gemini-api/docs/thinking
+
+The LLM must be configured as Gemini 3.0 Pro to ensure the 'Thinking' capability is 
+utilized before emitting the final JSON-formatted diagnostic.
+
+7. INFRASTRUCTURE & SECURITY
+----------------------------
+- DEPLOYMENT: Fully Dockerized.
+- NETWORKING: Isolated backend/frontend networks with Traefik as the gateway.
+- SECRETS: All API keys (Gemini), DB passwords, and SSH keys for load generation must 
+  be managed via Docker Secrets or encrypted environment files.
+- SSL: Automated via Traefik and Let's Encrypt.
+
+8. DATA SCHEMAS
+---------------
+- POSTGRES: Targets (name, env, labels), Profiles (mean_cpu, duration, integral), 
+  Incident History (logs_snapshot, llm_output).
+- REDIS: Active incident tracking (key: incident_id, val: status_json, ttl: expected_end).
+
+-- Target Management
+CREATE TABLE targets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    label_name VARCHAR(255) UNIQUE, -- Matches Prometheus 'instance'
+    display_name VARCHAR(255),
+    environment VARCHAR(50) CHECK (environment IN ('dev', 'test', 'prod')),
+    priority INT DEFAULT 1,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- LLM Analysis History
+CREATE TABLE incident_analysis (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    target_id UUID REFERENCES targets(id),
+    raw_metrics JSONB,
+    loki_logs_snapshot TEXT,
+    llm_thought_process TEXT,
+    llm_structured_output JSONB,
+    final_severity VARCHAR(20),
+    is_anomaly BOOLEAN
+);
+
+9. SUCCESS CRITERIA
+-------------------
+- Zero "Alert Fatigue": No notifications for expected maintenance spikes.
+- Real-time Visibility: Logs and LLM thoughts must stream without UI lag.
+- Predictive Capacity: Accurate "Time to Full" warnings for disk trends before 
+  reaching critical thresholds.
+======================================================

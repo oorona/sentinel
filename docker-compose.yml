@@ -1,0 +1,94 @@
+name: sentinel
+
+# ============================================================
+# Networks — all external (already created by your main stack)
+#
+#  internet  → Traefik ↔ public-facing UIs  (sentinel-ui joins this)
+#  intranet  → sentinel-ui ↔ sentinel-api   (internal API communication)
+#  dbnet     → sentinel-api ↔ postgres, prometheus, loki, redis (external)
+# ============================================================
+networks:
+  internet:
+    external: true
+  intranet:
+    external: true
+  dbnet:
+    external: true
+
+# ============================================================
+# Services
+# ============================================================
+services:
+
+  # ----------------------------------------------------------
+  # Frontend  (Next.js 15)
+  #
+  # Traefik terminates HTTPS at the domain defined by SENTINEL_DOMAIN
+  # in .env and forwards all traffic here.  The Next.js server-side
+  # rewrite proxies /api/* → sentinel-api:8000 over the intranet so
+  # the API is never directly exposed on the internet network.
+  # ----------------------------------------------------------
+  sentinel-ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sentinel-ui
+    restart: unless-stopped
+    networks:
+      - internet    # Traefik reaches it here
+      - intranet    # Next.js server proxies /api/* to sentinel-api here
+    environment:
+      # Internal proxy target — not a secret, just an intranet hostname
+      - INTERNAL_API_URL=http://sentinel-api:8000
+    depends_on:
+      - sentinel-api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sentinel-ui.rule=Host(`${SENTINEL_DOMAIN}`)"
+      - "traefik.http.routers.sentinel-ui.entrypoints=websecure"
+      - "traefik.http.routers.sentinel-ui.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sentinel-ui.loadbalancer.server.port=3000"
+      # REQUIRED: container is on two networks (internet + intranet); without this
+      # label Traefik picks the wrong network IP and cannot reach the container.
+      - "traefik.docker.network=internet"
+
+  # ----------------------------------------------------------
+  # Backend API  (FastAPI + Monitoring Worker)
+  #
+  # Lives only on intranet + dbnet — never directly reachable
+  # from outside.  All external access goes through sentinel-ui.
+  # Secrets (Gemini key, DB password) are mounted from Docker
+  # secrets at /run/secrets/.
+  # ----------------------------------------------------------
+  sentinel-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-api
+    restart: unless-stopped
+    networks:
+      - intranet    # Reachable by sentinel-ui proxy
+      - dbnet       # Reaches postgres, prometheus, loki, redis
+    env_file:
+      - .env        # All non-sensitive vars — service URLs, thresholds, model names (see .env.example)
+    secrets:
+      - gemini_api_key    # Mounted at /run/secrets/gemini_api_key
+      - postgres_password # Mounted at /run/secrets/postgres_password
+
+# ============================================================
+# Docker Secrets
+# Secrets live outside this project. Set SENTINEL_SECRETS_DIR
+# to the directory containing the secret files before deploying:
+#
+#   export SENTINEL_SECRETS_DIR=/path/to/your/secrets
+#   docker compose up -d
+#
+# Expected files:
+#   $SENTINEL_SECRETS_DIR/gemini_api_key.txt
+#   $SENTINEL_SECRETS_DIR/postgres_password.txt
+# ============================================================
+secrets:
+  gemini_api_key:
+    file: ${SENTINEL_SECRETS_DIR}/gemini_api_key.txt
+  postgres_password:
+    file: ${SENTINEL_SECRETS_DIR}/postgres_password.txt

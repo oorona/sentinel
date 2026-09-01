@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "properties": {
+    "is_anomaly": {
+      "type": "boolean",
+      "description": "True if the event does not match a known healthy pattern or is a verified failure."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["INFO", "WARNING", "CRITICAL"]
+    },
+    "root_cause_analysis": {
+      "type": "string",
+      "description": "A 2-3 sentence summary of the primary reason for the incident."
+    },
+    "detected_errors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Specific error codes or log snippets identified as relevant."
+    },
+    "remediation_steps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Step-by-step instructions for the DBA to resolve the issue."
+    },
+    "confidence_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "The model's self-assessed certainty of this diagnosis."
+    }
+  },
+  "required": ["is_anomaly", "severity", "root_cause_analysis", "confidence_score"]
+}

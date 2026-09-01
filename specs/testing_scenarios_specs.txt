@@ -1,0 +1,24 @@
+PROJECT: Sentinel Validation & Testing Scenarios
+================================================
+
+1. TEST CASE: THE "LATE BATCH"
+- Setup: Schedule 10-minute load via Load-Gen.
+- Action: Force Load-Gen to run for 20 minutes.
+- Expected Result: 
+  - T+0: Card appears (Green).
+  - T+11: Card turns Red. 
+  - T+12: Gemini 'Thinking' stream begins.
+
+2. TEST CASE: THE "SNEAKY LEAK"
+- Setup: Start a very slow incrementing CPU load (1% increase per minute).
+- Expected Result: 
+  - The CUSUM integrator should trip once the mean shift is statistically 
+    significant, even if the absolute CPU is only 30%.
+  - Card should be marked 'UNEXPECTED'.
+
+3. TEST CASE: LLM HALLUCINATION CHECK
+- Setup: Provide Gemini with Prometheus data showing 99% CPU but Loki logs 
+  that are completely empty (no errors).
+- Expected Result:
+  - LLM should state: "High CPU detected, but no supporting evidence in logs. 
+    Root cause remains ambiguous; suggest manual inspection of process list."
