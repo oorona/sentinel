@@ -29,3 +29,8 @@ out/
 *.swp
 .idea/
 .vscode/
+
+# Local agent config
+.claude/
+CLAUDE.md
+CLAUDE.local.md
